@@ -1,0 +1,93 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Check Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"check",
+				"--package=perestroika",
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Build Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--release",
+				"--package=perestroika",
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Test Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"test",
+				"--release",
+				"--package=perestroika",
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Bench Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"bench",
+				"--package=perestroika",
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Run Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"run",
+				"--release",
+				"--package=perestroika",
+				"--bin=perestroika"
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Test Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--release",
+				"--package=perestroika",
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Doc Perestroika",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"doc",
+			],
+			"problemMatcher": [
+				"$rustc"
+			]
+		}
+	]
+}

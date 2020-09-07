@@ -1,0 +1,40 @@
+[package]
+name = "perestroika"
+version = "0.1.0"
+authors = ["Michael Carpenter <mcarpenter.dev@gmail.com>"]
+edition = "2018"
+
+[features]
+default = ["gfx-backend-vulkan"]
+metal = ["gfx-backend-metal"]
+dx12 = ["gfx-backend-dx12"]
+vulkan = ["gfx-backend-vulkan"]
+unstable = []
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+cpal = { git = "https://github.com/RustAudio/cpal.git"}
+fern = { version = "0.6", features = ["colored"] }
+image = "0.23"
+log = "0.4"
+hal = { version = "0.5", package = "gfx-hal" }
+gfx-backend-empty = "0.5"
+mint = { version = "0.5" }
+nalgebra-glm = "0.3"
+rand = "0.7"
+shaderc = "0.6"
+toml = "0.5"
+winit = { version = "0.22" }
+
+[dependencies.gfx-backend-vulkan]
+version = "0.5"
+features = ["x11"]
+optional = true
+
+[target.'cfg(any(target_os = "macos", all(target_os = "ios", target_arch = "aarch64")))'.dependencies.gfx-backend-metal]
+version = "0.5"
+optional = true
+
+[target.'cfg(windows)'.dependencies.gfx-backend-dx12]
+version = "0.5"
+optional = true
