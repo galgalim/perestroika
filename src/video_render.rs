@@ -8,12 +8,20 @@ use hal::{
     buffer::{self, IndexBufferView, SubRange},
     command, format as f,
     format::{AsFormat, ChannelType, Rgba8Srgb as ColorFormat, Swizzle},
-    image as i, memory as m, pass,
-    pass::Subpass,
+    image as i, memory as m,
+    memory::Dependencies,
+    pass,
+    pass::{
+        Attachment, AttachmentLoadOp, AttachmentOps, AttachmentStoreOp, Subpass, SubpassDependency,
+    },
     pool,
     prelude::*,
     pso,
-    pso::{PipelineStage, ShaderStageFlags, VertexInputRate},
+    pso::{
+        BakedStates, DepthStencilDesc, DepthTest, ElemOffset, Face, FrontFace, InputAssemblerDesc,
+        PipelineStage, PolygonMode, Rasterizer, ShaderStageFlags, StencilTest, VertexInputRate,
+        Viewport,
+    },
     queue::{QueueGroup, Submission},
     window, IndexType,
 };
@@ -148,13 +156,6 @@ const COLOR_RANGE: i::SubresourceRange = i::SubresourceRange {
     layers: 0..1,
 };
 
-#[derive(Debug, Clone)]
-pub struct UniformBufferObject {
-    model: TMat4<f32>,
-    view: TMat4<f32>,
-    proj: TMat4<f32>,
-}
-
 pub struct Renderer<B: hal::Backend> {
     instance: Option<B::Instance>,
     device: B::Device,
@@ -174,7 +175,6 @@ pub struct Renderer<B: hal::Backend> {
     submission_complete_fences: Vec<B::Fence>,
     cmd_pools: Vec<B::CommandPool>,
     cmd_buffers: Vec<B::CommandBuffer>,
-    ubo: UniformBufferObject,
     vertex_buffer_bundle: BufferBundle<B, B::Device>,
     index_buffer_bundle: BufferBundle<B, B::Device>,
     image_upload_buffer: ManuallyDrop<B::Buffer>,
@@ -280,27 +280,27 @@ where
         let desc_set = unsafe { desc_pool.allocate_set(&set_layout) }
             .map_err(|_| "Couldn't make a Descriptor Set!")?;
 
-        let ubo = get_ubo();
-
         // Buffer allocations
         debug!("Memory types: {:?}", memory_types);
         let non_coherent_alignment = limits.non_coherent_atom_size as u64;
 
-        let vertex_buffer_stride = mem::size_of::<Vertex>() as u64;
-
-        let vertex_buffer_len = CUBE_VERTEXES.len() as u64 * vertex_buffer_stride;
-        assert_ne!(vertex_buffer_len, 0);
-
-        let vertex_padded_buffer_len = ((vertex_buffer_len + non_coherent_alignment - 1)
-            / non_coherent_alignment)
-            * non_coherent_alignment;
-
+        let (vertex_buffer_len, vertex_padded_buffer_len) =
+            get_buffer_lens::<Vertex>(&CUBE_VERTEXES, non_coherent_alignment);
         let mut vertex_transfer_buffer_bundle = BufferBundle::new(
             &device,
             vertex_padded_buffer_len,
             buffer::Usage::VERTEX | buffer::Usage::TRANSFER_SRC,
             &memory_types,
             m::Properties::CPU_VISIBLE | m::Properties::COHERENT,
+        )
+        .unwrap();
+
+        let mut vertex_buffer_bundle = BufferBundle::new(
+            &device,
+            vertex_padded_buffer_len,
+            buffer::Usage::VERTEX | buffer::Usage::TRANSFER_DST,
+            &memory_types,
+            m::Properties::DEVICE_LOCAL,
         )
         .unwrap();
 
@@ -329,20 +329,36 @@ where
             vertex_transfer_buffer_bundle
         };
 
-        let index_buffer_stride = mem::size_of::<u16>() as u64;
+        copy_buffer(
+            &device,
+            &mut queue_group,
+            &mut command_pool,
+            &mut vertex_transfer_buffer_bundle,
+            &mut vertex_buffer_bundle,
+            &[command::BufferCopy {
+                src: 0,
+                dst: 0,
+                size: vertex_padded_buffer_len,
+            }],
+        );
 
-        let index_buffer_len = CUBE_INDEXES.len() as u64 * index_buffer_stride;
-        assert_ne!(index_buffer_len, 0);
-
-        let index_padded_buffer_len = ((index_buffer_len + non_coherent_alignment - 1)
-            / non_coherent_alignment)
-            * non_coherent_alignment;
+        let (index_buffer_len, index_padded_buffer_len) =
+            get_buffer_lens::<u16>(&CUBE_INDEXES, non_coherent_alignment);
         let mut index_transfer_buffer_bundle = BufferBundle::new(
             &device,
             index_padded_buffer_len,
             buffer::Usage::INDEX | buffer::Usage::TRANSFER_SRC,
             &memory_types,
             m::Properties::CPU_VISIBLE | m::Properties::COHERENT,
+        )
+        .unwrap();
+
+        let mut index_buffer_bundle = BufferBundle::new(
+            &device,
+            index_padded_buffer_len,
+            buffer::Usage::INDEX | buffer::Usage::TRANSFER_DST,
+            &memory_types,
+            m::Properties::DEVICE_LOCAL,
         )
         .unwrap();
 
@@ -371,36 +387,6 @@ where
             index_transfer_buffer_bundle
         };
 
-        let mut vertex_buffer_bundle = BufferBundle::new(
-            &device,
-            vertex_padded_buffer_len,
-            buffer::Usage::VERTEX | buffer::Usage::TRANSFER_DST,
-            &memory_types,
-            m::Properties::DEVICE_LOCAL,
-        )
-        .unwrap();
-
-        let mut index_buffer_bundle = BufferBundle::new(
-            &device,
-            index_padded_buffer_len,
-            buffer::Usage::INDEX | buffer::Usage::TRANSFER_DST,
-            &memory_types,
-            m::Properties::DEVICE_LOCAL,
-        )
-        .unwrap();
-
-        copy_buffer(
-            &device,
-            &mut queue_group,
-            &mut command_pool,
-            &mut vertex_transfer_buffer_bundle,
-            &mut vertex_buffer_bundle,
-            &[command::BufferCopy {
-                src: 0,
-                dst: 0,
-                size: vertex_padded_buffer_len,
-            }],
-        );
         copy_buffer(
             &device,
             &mut queue_group,
@@ -414,6 +400,7 @@ where
             }],
         );
 
+        // Image Upload
         let upload_type = vertex_transfer_buffer_bundle.memory_type_id;
 
         let (width, height) = map_img.dimensions();
@@ -615,6 +602,7 @@ where
         let swap_config = window::SwapchainConfig::from_caps(&caps, format, DIMS);
         debug!("{:?}", swap_config);
         let extent = swap_config.extent;
+        debug!("Extent: {:?}", extent);
         unsafe {
             surface
                 .configure_swapchain(&device, swap_config)
@@ -622,7 +610,7 @@ where
         };
 
         let render_pass = {
-            let attachment = pass::Attachment {
+            let color_attachment = pass::Attachment {
                 format: Some(format),
                 samples: 1,
                 ops: pass::AttachmentOps::new(
@@ -642,7 +630,7 @@ where
             };
 
             ManuallyDrop::new(
-                unsafe { device.create_render_pass(&[attachment], &[subpass], &[]) }
+                unsafe { device.create_render_pass(&[color_attachment], &[subpass], &[]) }
                     .expect("Can't create render pass"),
             )
         };
@@ -691,7 +679,7 @@ where
             cmd_buffers.push(unsafe { cmd_pools[i].allocate_one(command::Level::Primary) });
         }
 
-        let push_constants = vec![(ShaderStageFlags::VERTEX, 0..8)];
+        let push_constants = vec![(ShaderStageFlags::VERTEX, 0..64)];
         let pipeline_layout = ManuallyDrop::new(
             unsafe { device.create_pipeline_layout(iter::once(&*set_layout), push_constants) }
                 .expect("Can't create pipeline layout"),
@@ -751,10 +739,20 @@ where
                     main_pass: &*render_pass,
                 };
 
+                let rasterizer = Rasterizer {
+                    depth_clamping: false,
+                    polygon_mode: PolygonMode::Fill,
+                    cull_face: Face::BACK,
+                    front_face: FrontFace::Clockwise,
+                    depth_bias: None,
+                    conservative: false,
+                    line_width: pso::State::Dynamic,
+                };
+
                 let mut pipeline_desc = pso::GraphicsPipelineDesc::new(
                     shader_entries,
                     pso::Primitive::TriangleList,
-                    pso::Rasterizer::FILL,
+                    rasterizer,
                     &*pipeline_layout,
                     subpass,
                 );
@@ -781,7 +779,7 @@ where
                     binding: 0,
                     element: pso::Element {
                         format: f::Format::Rg32Sfloat,
-                        offset: 12,
+                        offset: size_of::<[f32; 3]>() as ElemOffset,
                     },
                 });
 
@@ -828,7 +826,6 @@ where
             submission_complete_fences,
             cmd_pools,
             cmd_buffers,
-            ubo,
             vertex_buffer_bundle,
             index_buffer_bundle,
             image_upload_buffer,
@@ -858,13 +855,17 @@ where
         self.viewport.rect.h = extent.height as _;
     }
 
-    pub fn render(&mut self) {
+    pub fn render(
+        &mut self,
+        view_projection: &glm::TMat4<f32>,
+        models: &[glm::TMat4<f32>],
+    ) -> Result<(), &'static str> {
         let surface_image = unsafe {
             match self.surface.acquire_image(!0) {
                 Ok((image, _)) => image,
                 Err(_) => {
                     self.recreate_swapchain();
-                    return;
+                    return Ok(());
                 }
             }
         };
@@ -939,14 +940,16 @@ where
                 }],
                 command::SubpassContents::Inline,
             );
-            let mvp = self.ubo.proj * self.ubo.view * self.ubo.model;
-            cmd_buffer.push_graphics_constants(
-                &self.pipeline_layout,
-                ShaderStageFlags::VERTEX,
-                0,
-                cast_slice(&mvp.data).unwrap(),
-            );
-            cmd_buffer.draw_indexed(0..CUBE_VERTEXES.len() as u32, 0, 0..1);
+            for model in models.iter() {
+                let mvp = view_projection * model;
+                cmd_buffer.push_graphics_constants(
+                    &self.pipeline_layout,
+                    ShaderStageFlags::VERTEX,
+                    0,
+                    cast_slice(&mvp.data).unwrap(),
+                );
+                cmd_buffer.draw_indexed(0..CUBE_INDEXES.len() as u32, 0, 0..1);
+            }
             cmd_buffer.end_render_pass();
             cmd_buffer.finish();
 
@@ -976,6 +979,8 @@ where
 
         // Increment our frame
         self.frame += 1;
+
+        Ok(())
     }
 }
 
@@ -1122,19 +1127,33 @@ fn copy_buffer<B: hal::Backend, D: hal::device::Device<B>>(
     }
 }
 
-fn get_ubo() -> UniformBufferObject {
-    let model: TMat4<f32> = glm::identity();
-
-    let view = glm::look_at_lh(
-        &glm::vec3(0.0001f32, 0.0f32, -3.0f32),
+pub fn view() -> TMat4<f32> {
+    glm::look_at_lh(
+        &glm::vec3(7.0f32, 3.0f32, -4.0f32),
         &glm::vec3(0.0f32, 0.0f32, 0.0f32),
-        &glm::vec3(0.0f32, 0.0f32, -1.0f32),
-    );
-    let proj: glm::TMat4<f32> = {
-        let mut tmp = glm::perspective_lh_zo(1920.0 / 1080.0, f32::to_radians(45.0), 0.1, 100.0);
-        tmp[(1, 1)] *= -1.0;
-        tmp
-    };
+        &glm::vec3(0.0f32, 1.0f32, 0.0f32),
+    )
+}
 
-    UniformBufferObject { model, view, proj }
+pub fn projection() -> TMat4<f32> {
+    let mut tmp = glm::perspective_lh_zo(1920.0 / 1080.0, f32::to_radians(50.0), 0.1f32, 100.0f32);
+    tmp[(1, 1)] *= -1.0;
+    tmp
+}
+
+pub fn view_projection() -> TMat4<f32> {
+    let proj = projection();
+    let view = view();
+    proj * view
+}
+
+pub fn get_buffer_lens<T>(buffer: &[T], non_coherent_alignment: u64) -> (u64, u64) {
+    let buffer_stride = mem::size_of::<T>() as u64;
+
+    let buffer_len = buffer.len() as u64 * buffer_stride;
+    assert_ne!(buffer_len, 0);
+
+    let padded_buffer_len = ((buffer_len + non_coherent_alignment - 1) / non_coherent_alignment)
+        * non_coherent_alignment;
+    (buffer_len, padded_buffer_len)
 }

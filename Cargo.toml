@@ -21,6 +21,8 @@ hal = { version = "0.5", package = "gfx-hal" }
 gfx-backend-empty = "0.5"
 mint = { version = "0.5" }
 nalgebra-glm = "0.3"
+ncollide3d = "0.24.0"
+nphysics3d = "0.17.0"
 rand = "0.7"
 shaderc = "0.6"
 toml = "0.5"

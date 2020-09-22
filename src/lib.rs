@@ -9,9 +9,14 @@ use hal::Instance;
 use image::RgbaImage;
 use log::{debug, info, trace, warn};
 use nalgebra_glm as glm;
+use std::collections::HashSet;
 use std::io::{stdin, Cursor, Read, Write};
 use std::thread;
 use std::time::Instant;
+use winit::event::{
+    DeviceEvent, ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent,
+};
+use winit::event_loop::ControlFlow;
 
 pub use logging::setup_logging;
 
@@ -19,13 +24,13 @@ pub mod audio_render;
 pub mod camera;
 pub mod experimental;
 pub mod game;
-pub mod input;
 pub mod logging;
 pub mod ui;
 pub mod video_render;
-pub mod window;
 
+use camera::Camera;
 pub use game::{TileType, World};
+use video_render::view_projection;
 
 pub fn run_perestroika() {
     std::env::set_var("RUST_BACKTRACE", "1");
@@ -43,7 +48,7 @@ pub fn run_perestroika() {
         .with_title("perestroika".to_string());
 
     // instantiate backend
-    let (_window, instance, mut adapters, surface) = {
+    let (window, instance, mut adapters, surface) = {
         let window = wb.build(&event_loop).unwrap();
         let instance =
             back::Instance::create("perestroika", 1).expect("Failed to create an instance!");
@@ -90,35 +95,134 @@ pub fn run_perestroika() {
     let mut renderer = video_render::Renderer::new(instance, surface, adapter, map_img)
         .expect("Failed to create Renderer!");
 
-    renderer.render();
+    let view_projection = view_projection();
+    let models = vec![
+        glm::identity(),
+        glm::translate(&glm::identity(), &glm::make_vec3(&[1.5, 0.1, 0.0])),
+        glm::translate(&glm::identity(), &glm::make_vec3(&[-3.0, 2.0, 3.0])),
+        glm::translate(&glm::identity(), &glm::make_vec3(&[0.5, -4.0, 4.0])),
+        glm::translate(&glm::identity(), &glm::make_vec3(&[-3.4, -2.3, 1.0])),
+        glm::translate(&glm::identity(), &glm::make_vec3(&[-2.8, -0.7, 5.0])),
+    ];
+    let (mut frame_width, mut frame_height): (f32, f32) = window.inner_size().into();
+    let camera = Camera::at_position(glm::make_vec3(&[0.0, 0.0, -5.0]));
+    let mut keys_held: HashSet<VirtualKeyCode> = HashSet::new();
+    let mut grabbed = false;
+    let mut orientation_change: (f32, f32) = (0.0, 0.0);
+    let mut new_frame_size: Option<(f64, f64)> = None;
+    let mut seconds: f32 = 0.0;
+    let mut last_timestamp = Instant::now();
+    let mut spare_time = 0.0;
 
-    event_loop.run(move |event, _, control_flow| match event {
-        winit::event::Event::WindowEvent { event, .. } => match event {
-            winit::event::WindowEvent::CloseRequested => {
-                *control_flow = winit::event_loop::ControlFlow::Exit
-            }
-            winit::event::WindowEvent::KeyboardInput {
-                input:
-                    winit::event::KeyboardInput {
-                        virtual_keycode: Some(winit::event::VirtualKeyCode::Escape),
-                        ..
-                    },
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *control_flow = winit::event_loop::ControlFlow::Exit,
+                WindowEvent::KeyboardInput {
+                    input:
+                        winit::event::KeyboardInput {
+                            virtual_keycode: Some(winit::event::VirtualKeyCode::Escape),
+                            ..
+                        },
+                    ..
+                } => *control_flow = winit::event_loop::ControlFlow::Exit,
+                WindowEvent::Resized(dims) => {
+                    debug!("resized to {:?}", dims);
+                    renderer.dimensions = hal::window::Extent2D {
+                        width: dims.width,
+                        height: dims.height,
+                    };
+                    new_frame_size = Some((dims.width as f64, dims.height as f64));
+                    renderer.recreate_swapchain();
+                }
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state,
+                            virtual_keycode: Some(code),
+                            ..
+                        },
+                    ..
+                } => {
+                    #[cfg(feature = "metal")]
+                    {
+                        match state {
+                            ElementState::Pressed => keys_held.insert(code),
+                            ElementState::Released => keys_held.remove(&code),
+                        }
+                    };
+                    if state == ElementState::Pressed {
+                        match code {
+                            VirtualKeyCode::Escape => {
+                                if grabbed {
+                                    debug!("Escape pressed while grabbed, releasing the mouse!");
+                                    window
+                                        .set_cursor_grab(false)
+                                        .expect("Failed to release the mouse grab!");
+                                    window.set_cursor_visible(true);
+                                    grabbed = false;
+                                }
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if grabbed {
+                        debug!("Click! We already have the mouse grabbed.");
+                    } else {
+                        debug!("Click! Grabbing the mouse.");
+                        window
+                            .set_cursor_grab(true)
+                            .expect("Failed to grab the mouse!");
+                        window.set_cursor_visible(false);
+                        grabbed = true;
+                    }
+                }
+                WindowEvent::Focused(false) => {
+                    if grabbed {
+                        debug!("Lost Focus, releasing the mouse grab...");
+                        window
+                            .set_cursor_grab(false)
+                            .expect("Failed to release the mouse grab!");
+                        window.set_cursor_visible(true);
+                        grabbed = false;
+                    } else {
+                        debug!("Lost Focus when mouse wasn't grabbed.");
+                    }
+                }
+                _ => {}
+            },
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta: (dx, dy) },
                 ..
-            } => *control_flow = winit::event_loop::ControlFlow::Exit,
-            winit::event::WindowEvent::Resized(dims) => {
-                debug!("resized to {:?}", dims);
-                renderer.dimensions = hal::window::Extent2D {
-                    width: dims.width,
-                    height: dims.height,
-                };
-                renderer.recreate_swapchain();
+            } => {
+                if grabbed {
+                    orientation_change.0 -= dx as f32;
+                    orientation_change.1 -= dy as f32;
+                }
+            }
+            Event::RedrawEventsCleared => {
+                renderer.render(&view_projection, &models).unwrap();
             }
             _ => {}
-        },
-        winit::event::Event::RedrawEventsCleared => {
-            renderer.render();
         }
-        _ => {}
+        seconds = {
+            let now = Instant::now();
+            let duration = now.duration_since(last_timestamp);
+            last_timestamp = now;
+            duration.as_secs() as f32 + duration.subsec_nanos() as f32 * 1e-9
+        };
+        keys_held = if grabbed {
+            keys_held.clone()
+        } else {
+            HashSet::new()
+        }
     });
 }
 

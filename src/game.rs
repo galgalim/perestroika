@@ -1,46 +1,6 @@
 use crate::camera::Camera;
-use crate::input::UserInput;
 use nalgebra_glm as glm;
 use rand::prelude::*;
-
-#[derive(Debug, Clone)]
-pub struct LocalState {
-    pub frame_width: f64,
-    pub frame_height: f64,
-    pub cubes: Vec<glm::TMat4<f32>>,
-    pub camera: Camera,
-    pub perspective_projection: glm::TMat4<f32>,
-    pub spare_time: f32,
-}
-
-impl LocalState {
-    pub fn update_from_input(&mut self, input: UserInput) {
-        if let Some(frame_size) = input.new_frame_size {
-            self.frame_width = frame_size.0;
-            self.frame_height = frame_size.1;
-        }
-        assert!(self.frame_width != 0.0 && self.frame_height != 0.0);
-        self.spare_time += input.seconds;
-        const ONE_SIXTIETH: f32 = 1.0 / 60.0;
-        while self.spare_time > 0.0 {
-            for (i, cube_mut) in self.cubes.iter_mut().enumerate() {
-                let r = ONE_SIXTIETH * 30.0 * (i as f32 + 1.0) / 1 as f32;
-                *cube_mut = glm::rotate(
-                    &cube_mut,
-                    f32::to_radians(r),
-                    &glm::make_vec3(&[0.3, 0.4, 0.5]).normalize(),
-                );
-            }
-            self.spare_time -= ONE_SIXTIETH;
-        }
-        const MOUSE_SENSITIVITY: f32 = 0.05;
-        let d_pitch_deg = input.orientation_change.1 * MOUSE_SENSITIVITY;
-        let d_yaw_deg = -input.orientation_change.0 * MOUSE_SENSITIVITY;
-        self.camera.update_orientation(d_pitch_deg, d_yaw_deg);
-        self.camera
-            .update_position(&input.keys_held, 5.0 * input.seconds);
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum TileType {

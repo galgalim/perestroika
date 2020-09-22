@@ -8,13 +8,14 @@ use winit::event::{
 use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
 
-#[derive(Debug, Clone)]
+/// Acts like a normal "FPS" camera, capped at +/- 89 degrees, no roll.
+#[derive(Debug, Clone, Copy)]
 pub struct Camera {
+    /// Camera position, free free to directly update at any time.
     pub position: glm::TVec3<f32>,
     pitch_deg: f32,
     yaw_deg: f32,
 }
-
 impl Camera {
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
 
@@ -28,11 +29,17 @@ impl Camera {
         ])
     }
 
+    /// Adjusts the camera's orientation.
+    ///
+    /// Input deltas should be in _degrees_, pitch is capped at +/- 89 degrees.
     pub fn update_orientation(&mut self, d_pitch_deg: f32, d_yaw_deg: f32) {
         self.pitch_deg = (self.pitch_deg + d_pitch_deg).max(-89.0).min(89.0);
         self.yaw_deg = (self.yaw_deg + d_yaw_deg) % 360.0;
     }
 
+    /// Updates the position using WASDQE controls.
+    ///
+    /// The "forward" vector is relative to the current orientation.
     pub fn update_position(&mut self, keys: &HashSet<VirtualKeyCode>, distance: f32) {
         let up = glm::make_vec3(&Self::UP);
         let forward = self.make_front();
@@ -54,6 +61,7 @@ impl Camera {
         }
     }
 
+    /// Generates the current view matrix for this camera.
     pub fn make_view_matrix(&self) -> glm::TMat4<f32> {
         glm::look_at_lh(
             &self.position,
@@ -62,6 +70,7 @@ impl Camera {
         )
     }
 
+    /// Makes a new camera at the position specified and Pitch/Yaw of `0.0`.
     pub const fn at_position(position: glm::TVec3<f32>) -> Self {
         Self {
             position,
