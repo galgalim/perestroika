@@ -1,0 +1,14 @@
+[package]
+name = "yantra_tokamak"
+version = "0.1.0"
+authors = ["Michael Carpenter <mcarpenter.dev@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+ash = { git = "https://github.com/MaikKlein/ash.git", branch="master"}
+ash-window = { git = "https://github.com/MaikKlein/ash.git", branch="master"}
+log = "0.4"
+shaderc = "0.7"
+tobj = "3.0.1"
+winit = "0.25.0"
+yantra_log = { path = "../yantra_log" }

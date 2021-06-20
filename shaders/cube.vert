@@ -2,7 +2,7 @@
 layout (push_constant) uniform PushConsts {
   mat4 mvp;
 } push;
-layout (location = 0) in vec3 position;
+layout (location = 0) in vec4 position;
 layout (location = 1) in vec2 vert_uv;
 
 layout (location = 0) out gl_PerVertex {
@@ -12,6 +12,6 @@ layout (location = 1) out vec2 frag_uv;
 
 void main()
 {
-  gl_Position = push.mvp * vec4(position, 1.0);
+  gl_Position = push.mvp * vec4(position);
   frag_uv = vert_uv;
 }

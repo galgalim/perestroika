@@ -1,0 +1,16 @@
+[package]
+name = "yantra"
+version = "0.1.0"
+authors = ["Michael Carpenter <mcarpenter.dev@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+image = "0.23"
+log = "0.4"
+nalgebra-glm = "0.3"
+rand = "0.8"
+winit = "0.25"
+yantra_audio = { path = "../yantra_audio" }
+yantra_graphics = { path = "../yantra_graphics" }
+yantra_log = { path = "../yantra_log" }
+yantra_tokamak = { path = "../yantra_tokamak"}

@@ -1,11 +1,13 @@
+extern crate gfx_backend_vulkan as back;
+
 use core::{
     marker::PhantomData,
     mem::{size_of, size_of_val, ManuallyDrop},
     ops::Deref,
 };
-use glm::TMat4;
-use hal::{
-    buffer::{self, IndexBufferView, SubRange},
+use gfx_hal::{
+    adapter::Adapter,
+    buffer::{self, SubRange},
     command, format as f,
     format::{AsFormat, ChannelType, Rgba8Srgb as ColorFormat, Swizzle},
     image as i, memory as m,
@@ -22,9 +24,11 @@ use hal::{
         PipelineStage, PolygonMode, Rasterizer, ShaderStageFlags, StencilTest, VertexInputRate,
         Viewport,
     },
-    queue::{QueueGroup, Submission},
-    window, IndexType,
+    queue::QueueGroup,
+    window::{self, Extent2D},
+    IndexType, MemoryTypeId,
 };
+use glm::TMat4;
 use image::RgbaImage;
 use log::{debug, error, info, warn};
 use nalgebra_glm as glm;
@@ -44,6 +48,26 @@ use winit::event::{
 };
 use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
+
+mod buffer_bundle;
+mod camera;
+mod depth_image;
+mod graphics_pipeline;
+mod render_pass;
+
+use buffer_bundle::{copy_buffer, BufferBundle};
+pub use camera::Camera;
+use depth_image::DepthImage;
+use graphics_pipeline::create_create_graphics_pipeline;
+use render_pass::create_render_pass;
+use std::{
+    ffi::CString,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 pub fn cast_slice(ts: &[f32]) -> Option<&[u32]> {
     use core::mem::align_of;
@@ -102,42 +126,42 @@ const ENTRY_NAME: &str = "main";
 #[allow(non_snake_case)]
 #[repr(C)]
 struct Vertex {
-    xyz: [f32; 3],
+    pos: [f32; 4],
     uv: [f32; 2],
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 const CUBE_VERTEXES: [Vertex; 24] = [
   // Face 1 (front)
-  Vertex { xyz: [0.0, 0.0, 0.0], uv: [0.0, 1.0] }, /* bottom left */
-  Vertex { xyz: [0.0, 1.0, 0.0], uv: [0.0, 0.0] }, /* top left */
-  Vertex { xyz: [1.0, 0.0, 0.0], uv: [1.0, 1.0] }, /* bottom right */
-  Vertex { xyz: [1.0, 1.0, 0.0], uv: [1.0, 0.0] }, /* top right */
+  Vertex { pos: [0.0, 0.0, 0.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
+  Vertex { pos: [0.0, 1.0, 0.0, 1.0], uv: [0.0, 0.0] }, /* top left */
+  Vertex { pos: [1.0, 0.0, 0.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
+  Vertex { pos: [1.0, 1.0, 0.0, 1.0], uv: [1.0, 0.0] }, /* top right */
   // Face 2 (top)
-  Vertex { xyz: [0.0, 1.0, 0.0], uv: [0.0, 1.0] }, /* bottom left */
-  Vertex { xyz: [0.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
-  Vertex { xyz: [1.0, 1.0, 0.0], uv: [1.0, 1.0] }, /* bottom right */
-  Vertex { xyz: [1.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
+  Vertex { pos: [0.0, 1.0, 0.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
+  Vertex { pos: [0.0, 1.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
+  Vertex { pos: [1.0, 1.0, 0.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
+  Vertex { pos: [1.0, 1.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
   // Face 3 (back)
-  Vertex { xyz: [0.0, 0.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
-  Vertex { xyz: [0.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
-  Vertex { xyz: [1.0, 0.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
-  Vertex { xyz: [1.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
+  Vertex { pos: [0.0, 0.0, 1.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
+  Vertex { pos: [0.0, 1.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
+  Vertex { pos: [1.0, 0.0, 1.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
+  Vertex { pos: [1.0, 1.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
   // Face 4 (bottom)
-  Vertex { xyz: [0.0, 0.0, 0.0], uv: [0.0, 1.0] }, /* bottom left */
-  Vertex { xyz: [0.0, 0.0, 1.0], uv: [0.0, 0.0] }, /* top left */
-  Vertex { xyz: [1.0, 0.0, 0.0], uv: [1.0, 1.0] }, /* bottom right */
-  Vertex { xyz: [1.0, 0.0, 1.0], uv: [1.0, 0.0] }, /* top right */
+  Vertex { pos: [0.0, 0.0, 0.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
+  Vertex { pos: [0.0, 0.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
+  Vertex { pos: [1.0, 0.0, 0.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
+  Vertex { pos: [1.0, 0.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
   // Face 5 (left)
-  Vertex { xyz: [0.0, 0.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
-  Vertex { xyz: [0.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
-  Vertex { xyz: [0.0, 0.0, 0.0], uv: [1.0, 1.0] }, /* bottom right */
-  Vertex { xyz: [0.0, 1.0, 0.0], uv: [1.0, 0.0] }, /* top right */
+  Vertex { pos: [0.0, 0.0, 1.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
+  Vertex { pos: [0.0, 1.0, 1.0, 1.0], uv: [0.0, 0.0] }, /* top left */
+  Vertex { pos: [0.0, 0.0, 0.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
+  Vertex { pos: [0.0, 1.0, 0.0, 1.0], uv: [1.0, 0.0] }, /* top right */
   // Face 6 (right)
-  Vertex { xyz: [1.0, 0.0, 0.0], uv: [0.0, 1.0] }, /* bottom left */
-  Vertex { xyz: [1.0, 1.0, 0.0], uv: [0.0, 0.0] }, /* top left */
-  Vertex { xyz: [1.0, 0.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
-  Vertex { xyz: [1.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
+  Vertex { pos: [1.0, 0.0, 0.0, 1.0], uv: [0.0, 1.0] }, /* bottom left */
+  Vertex { pos: [1.0, 1.0, 0.0, 1.0], uv: [0.0, 0.0] }, /* top left */
+  Vertex { pos: [1.0, 0.0, 1.0, 1.0], uv: [1.0, 1.0] }, /* bottom right */
+  Vertex { pos: [1.0, 1.0, 1.0, 1.0], uv: [1.0, 0.0] }, /* top right */
 ];
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
@@ -150,20 +174,19 @@ const CUBE_INDEXES: [u16; 36] = [
   20, 21, 22, 23, 22, 21, // right
 ];
 
-const COLOR_RANGE: i::SubresourceRange = i::SubresourceRange {
-    aspects: f::Aspects::COLOR,
-    levels: 0..1,
-    layers: 0..1,
-};
+#[derive(Debug, Clone, Copy)]
+struct UniformBlock {
+    projection: [[f32; 4]; 4],
+}
 
-pub struct Renderer<B: hal::Backend> {
+pub struct Renderer<B: gfx_hal::Backend> {
     instance: Option<B::Instance>,
     device: B::Device,
     queue_group: QueueGroup<B>,
     desc_pool: ManuallyDrop<B::DescriptorPool>,
     surface: ManuallyDrop<B::Surface>,
-    adapter: hal::adapter::Adapter<B>,
-    format: hal::format::Format,
+    adapter: gfx_hal::adapter::Adapter<B>,
+    format: gfx_hal::format::Format,
     pub dimensions: window::Extent2D,
     viewport: pso::Viewport,
     render_pass: ManuallyDrop<B::RenderPass>,
@@ -178,6 +201,7 @@ pub struct Renderer<B: hal::Backend> {
     vertex_buffer_bundle: BufferBundle<B, B::Device>,
     index_buffer_bundle: BufferBundle<B, B::Device>,
     image_upload_buffer: ManuallyDrop<B::Buffer>,
+    depth_image: DepthImage<B, B::Device>,
     map_image: ManuallyDrop<B::Image>,
     image_srv: ManuallyDrop<B::ImageView>,
     image_memory: ManuallyDrop<B::Memory>,
@@ -189,16 +213,28 @@ pub struct Renderer<B: hal::Backend> {
 
 impl<B> Renderer<B>
 where
-    B: hal::Backend,
+    B: gfx_hal::Backend,
 {
-    pub fn new(
-        instance: Option<B::Instance>,
-        mut surface: B::Surface,
-        adapter: hal::adapter::Adapter<B>,
-        map_img: RgbaImage,
-    ) -> Result<Renderer<B>, &'static str> {
+    pub fn new(window: &Window, map_img: RgbaImage) -> Result<Renderer<B>, &'static str> {
+        let (window, instance, mut adapters, mut surface) = {
+            let instance = B::Instance::create("yantra", 1).expect("Failed to create an instance!");
+            let adapters = instance.enumerate_adapters();
+            let surface = unsafe {
+                instance
+                    .create_surface(window)
+                    .expect("Failed to create a surface!")
+            };
+            // Return `window` so it is not dropped: dropping it invalidates `surface`.
+            (window, Some(instance), adapters, surface)
+        };
+        for adapter in &adapters {
+            debug!("{:?}", adapter.info);
+        }
+
+        let adapter = adapters.remove(0);
+
         let memory_types = adapter.physical_device.memory_properties().memory_types;
-        let limits = adapter.physical_device.limits();
+        let limits = adapter.physical_device.properties().limits;
 
         // Build a new device and associated command queues
         let family = adapter
@@ -211,12 +247,11 @@ where
         let mut gpu = unsafe {
             adapter
                 .physical_device
-                .open(&[(family, &[1.0])], hal::Features::empty())
+                .open(&[(family, &[1.0])], gfx_hal::Features::empty())
                 .map_err(|_| "Couldn't open the PhysicalDevice!")?
         };
         let mut queue_group = gpu.queue_groups.pop().unwrap();
         let device = gpu.device;
-
         let mut command_pool = unsafe {
             device
                 .create_command_pool(queue_group.family, pool::CommandPoolCreateFlags::empty())
@@ -227,7 +262,7 @@ where
         let set_layout = ManuallyDrop::new(
             unsafe {
                 device.create_descriptor_set_layout(
-                    &[
+                    vec![
                         pso::DescriptorSetLayoutBinding {
                             binding: 0,
                             ty: pso::DescriptorType::Image {
@@ -246,8 +281,9 @@ where
                             stage_flags: ShaderStageFlags::FRAGMENT,
                             immutable_samplers: false,
                         },
-                    ],
-                    &[],
+                    ]
+                    .into_iter(),
+                    iter::empty(),
                 )
             }
             .map_err(|_| "Can't create descriptor set layout")?,
@@ -258,7 +294,7 @@ where
             unsafe {
                 device.create_descriptor_pool(
                     1, // sets
-                    &[
+                    vec![
                         pso::DescriptorRangeDesc {
                             ty: pso::DescriptorType::Image {
                                 ty: pso::ImageDescriptorType::Sampled {
@@ -271,62 +307,70 @@ where
                             ty: pso::DescriptorType::Sampler,
                             count: 1,
                         },
-                    ],
+                    ]
+                    .into_iter(),
                     pso::DescriptorPoolCreateFlags::empty(),
                 )
             }
             .map_err(|_| "Can't create descriptor pool")?,
         );
-        let desc_set = unsafe { desc_pool.allocate_set(&set_layout) }
+        let mut desc_set = unsafe { desc_pool.allocate_one(&set_layout) }
             .map_err(|_| "Couldn't make a Descriptor Set!")?;
 
         // Buffer allocations
         debug!("Memory types: {:?}", memory_types);
         let non_coherent_alignment = limits.non_coherent_atom_size as u64;
 
-        let (vertex_buffer_len, vertex_padded_buffer_len) =
-            get_buffer_lens::<Vertex>(&CUBE_VERTEXES, non_coherent_alignment);
-        let mut vertex_transfer_buffer_bundle = BufferBundle::new(
-            &device,
-            vertex_padded_buffer_len,
-            buffer::Usage::VERTEX | buffer::Usage::TRANSFER_SRC,
-            &memory_types,
-            m::Properties::CPU_VISIBLE | m::Properties::COHERENT,
-        )
-        .unwrap();
+        let (mut vertex_buffer_bundle, mut vertex_transfer_buffer_bundle, vertex_padded_buffer_len) = {
+            let (vertex_buffer_len, vertex_padded_buffer_len) =
+                get_buffer_lens::<Vertex>(&CUBE_VERTEXES, non_coherent_alignment);
+            let mut vertex_transfer_buffer_bundle = BufferBundle::new(
+                &device,
+                vertex_padded_buffer_len,
+                buffer::Usage::VERTEX | buffer::Usage::TRANSFER_SRC,
+                &memory_types,
+                m::Properties::CPU_VISIBLE | m::Properties::COHERENT,
+            )
+            .unwrap();
 
-        let mut vertex_buffer_bundle = BufferBundle::new(
-            &device,
-            vertex_padded_buffer_len,
-            buffer::Usage::VERTEX | buffer::Usage::TRANSFER_DST,
-            &memory_types,
-            m::Properties::DEVICE_LOCAL,
-        )
-        .unwrap();
+            let mut vertex_buffer_bundle = BufferBundle::new(
+                &device,
+                vertex_padded_buffer_len,
+                buffer::Usage::VERTEX | buffer::Usage::TRANSFER_DST,
+                &memory_types,
+                m::Properties::DEVICE_LOCAL,
+            )
+            .unwrap();
 
-        vertex_transfer_buffer_bundle = unsafe {
-            let memory = ManuallyDrop::into_inner(vertex_transfer_buffer_bundle.memory);
-            let requirements = vertex_transfer_buffer_bundle.requirements;
-            let vertex_buffer_mapping = device
-                .map_memory(
-                    &memory,
-                    m::Segment {
-                        offset: 0,
-                        size: Some(requirements.size),
-                    },
-                )
-                .unwrap();
-            ptr::copy_nonoverlapping(
-                CUBE_VERTEXES.as_ptr() as *const u8,
-                vertex_buffer_mapping,
-                vertex_buffer_len as usize,
-            );
-            device
-                .flush_mapped_memory_ranges(iter::once((&memory, m::Segment::ALL)))
-                .unwrap();
-            device.unmap_memory(&memory);
-            vertex_transfer_buffer_bundle.memory = ManuallyDrop::new(memory);
-            vertex_transfer_buffer_bundle
+            vertex_transfer_buffer_bundle = unsafe {
+                let mut memory = ManuallyDrop::into_inner(vertex_transfer_buffer_bundle.memory);
+                let requirements = vertex_transfer_buffer_bundle.requirements;
+                let vertex_buffer_mapping = device
+                    .map_memory(
+                        &mut memory,
+                        m::Segment {
+                            offset: 0,
+                            size: Some(requirements.size),
+                        },
+                    )
+                    .unwrap();
+                ptr::copy_nonoverlapping(
+                    CUBE_VERTEXES.as_ptr() as *const u8,
+                    vertex_buffer_mapping,
+                    vertex_buffer_len as usize,
+                );
+                device
+                    .flush_mapped_memory_ranges(iter::once((&memory, m::Segment::ALL)))
+                    .unwrap();
+                device.unmap_memory(&mut memory);
+                vertex_transfer_buffer_bundle.memory = ManuallyDrop::new(memory);
+                vertex_transfer_buffer_bundle
+            };
+            (
+                vertex_buffer_bundle,
+                vertex_transfer_buffer_bundle,
+                vertex_padded_buffer_len,
+            )
         };
 
         copy_buffer(
@@ -335,56 +379,64 @@ where
             &mut command_pool,
             &mut vertex_transfer_buffer_bundle,
             &mut vertex_buffer_bundle,
-            &[command::BufferCopy {
+            command::BufferCopy {
                 src: 0,
                 dst: 0,
                 size: vertex_padded_buffer_len,
-            }],
+            },
         );
 
-        let (index_buffer_len, index_padded_buffer_len) =
-            get_buffer_lens::<u16>(&CUBE_INDEXES, non_coherent_alignment);
-        let mut index_transfer_buffer_bundle = BufferBundle::new(
-            &device,
-            index_padded_buffer_len,
-            buffer::Usage::INDEX | buffer::Usage::TRANSFER_SRC,
-            &memory_types,
-            m::Properties::CPU_VISIBLE | m::Properties::COHERENT,
-        )
-        .unwrap();
+        let (mut index_buffer_bundle, mut index_transfer_buffer_bundle, index_padded_buffer_len) = {
+            let (index_buffer_len, index_padded_buffer_len) =
+                get_buffer_lens::<u16>(&CUBE_INDEXES, non_coherent_alignment);
+            let mut index_transfer_buffer_bundle = BufferBundle::new(
+                &device,
+                index_padded_buffer_len,
+                buffer::Usage::INDEX | buffer::Usage::TRANSFER_SRC,
+                &memory_types,
+                m::Properties::CPU_VISIBLE | m::Properties::COHERENT,
+            )
+            .unwrap();
 
-        let mut index_buffer_bundle = BufferBundle::new(
-            &device,
-            index_padded_buffer_len,
-            buffer::Usage::INDEX | buffer::Usage::TRANSFER_DST,
-            &memory_types,
-            m::Properties::DEVICE_LOCAL,
-        )
-        .unwrap();
+            let mut index_buffer_bundle = BufferBundle::new(
+                &device,
+                index_padded_buffer_len,
+                buffer::Usage::INDEX | buffer::Usage::TRANSFER_DST,
+                &memory_types,
+                m::Properties::DEVICE_LOCAL,
+            )
+            .unwrap();
 
-        index_transfer_buffer_bundle = unsafe {
-            let memory = ManuallyDrop::into_inner(index_transfer_buffer_bundle.memory);
-            let requirements = index_transfer_buffer_bundle.requirements;
-            let index_buffer_mapping = device
-                .map_memory(
-                    &memory,
-                    m::Segment {
-                        offset: 0,
-                        size: Some(requirements.size),
-                    },
-                )
-                .unwrap();
-            ptr::copy_nonoverlapping(
-                CUBE_INDEXES.as_ptr() as *const u8,
-                index_buffer_mapping,
-                index_buffer_len as usize,
-            );
-            device
-                .flush_mapped_memory_ranges(iter::once((&memory, m::Segment::ALL)))
-                .unwrap();
-            device.unmap_memory(&memory);
-            index_transfer_buffer_bundle.memory = ManuallyDrop::new(memory);
-            index_transfer_buffer_bundle
+            index_transfer_buffer_bundle = unsafe {
+                let mut memory = ManuallyDrop::into_inner(index_transfer_buffer_bundle.memory);
+                let requirements = index_transfer_buffer_bundle.requirements;
+                let index_buffer_mapping = device
+                    .map_memory(
+                        &mut memory,
+                        m::Segment {
+                            offset: 0,
+                            size: Some(requirements.size),
+                        },
+                    )
+                    .unwrap();
+                ptr::copy_nonoverlapping(
+                    CUBE_INDEXES.as_ptr() as *const u8,
+                    index_buffer_mapping,
+                    index_buffer_len as usize,
+                );
+                device
+                    .flush_mapped_memory_ranges(iter::once((&memory, m::Segment::ALL)))
+                    .unwrap();
+                device.unmap_memory(&mut memory);
+                index_transfer_buffer_bundle.memory = ManuallyDrop::new(memory);
+                index_transfer_buffer_bundle
+            };
+
+            (
+                index_buffer_bundle,
+                index_transfer_buffer_bundle,
+                index_padded_buffer_len,
+            )
         };
 
         copy_buffer(
@@ -393,11 +445,11 @@ where
             &mut command_pool,
             &mut index_transfer_buffer_bundle,
             &mut index_buffer_bundle,
-            &[command::BufferCopy {
+            command::BufferCopy {
                 src: 0,
                 dst: 0,
                 size: index_padded_buffer_len,
-            }],
+            },
         );
 
         // Image Upload
@@ -415,20 +467,26 @@ where
             * non_coherent_alignment;
 
         let mut image_upload_buffer = ManuallyDrop::new(
-            unsafe { device.create_buffer(padded_upload_size, buffer::Usage::TRANSFER_SRC) }
-                .unwrap(),
+            unsafe {
+                device.create_buffer(
+                    padded_upload_size,
+                    buffer::Usage::TRANSFER_SRC,
+                    m::SparseFlags::empty(),
+                )
+            }
+            .unwrap(),
         );
         let image_mem_reqs = unsafe { device.get_buffer_requirements(&image_upload_buffer) };
 
         // copy image data into staging buffer
         let image_upload_memory = unsafe {
-            let memory = device
+            let mut memory = device
                 .allocate_memory(upload_type, image_mem_reqs.size)
                 .map_err(|_| "Couldn't allocate buffer memory!")?;
             device
                 .bind_buffer_memory(&memory, 0, &mut image_upload_buffer)
                 .map_err(|_| "Couldn't bind the buffer memory!")?;
-            let mapping = device.map_memory(&memory, m::Segment::ALL).unwrap();
+            let mapping = device.map_memory(&mut memory, m::Segment::ALL).unwrap();
             for y in 0..height as usize {
                 let row = &(*map_img)[y * (width as usize) * image_stride
                     ..(y + 1) * (width as usize) * image_stride];
@@ -441,7 +499,7 @@ where
             device
                 .flush_mapped_memory_ranges(iter::once((&memory, m::Segment::ALL)))
                 .unwrap();
-            device.unmap_memory(&memory);
+            device.unmap_memory(&mut memory);
             ManuallyDrop::new(memory)
         };
 
@@ -453,6 +511,7 @@ where
                     ColorFormat::SELF,
                     i::Tiling::Optimal,
                     i::Usage::TRANSFER_DST | i::Usage::SAMPLED,
+                    m::SparseFlags::empty(),
                     i::ViewCapabilities::empty(),
                 )
             }
@@ -481,7 +540,11 @@ where
                     i::ViewKind::D2,
                     ColorFormat::SELF,
                     Swizzle::NO,
-                    COLOR_RANGE.clone(),
+                    i::Usage::TRANSFER_DST | i::Usage::SAMPLED,
+                    i::SubresourceRange {
+                        aspects: f::Aspects::COLOR,
+                        ..Default::default()
+                    },
                 )
             }
             .unwrap(),
@@ -498,23 +561,16 @@ where
         );
 
         unsafe {
-            device.write_descriptor_sets(vec![
-                pso::DescriptorSetWrite {
-                    set: &desc_set,
-                    binding: 0,
-                    array_offset: 0,
-                    descriptors: Some(pso::Descriptor::Image(
-                        &*image_srv,
-                        i::Layout::ShaderReadOnlyOptimal,
-                    )),
-                },
-                pso::DescriptorSetWrite {
-                    set: &desc_set,
-                    binding: 1,
-                    array_offset: 0,
-                    descriptors: Some(pso::Descriptor::Sampler(&*sampler)),
-                },
-            ]);
+            device.write_descriptor_set(pso::DescriptorSetWrite {
+                set: &mut desc_set,
+                binding: 0,
+                array_offset: 0,
+                descriptors: vec![
+                    pso::Descriptor::Image(&*image_srv, i::Layout::ShaderReadOnlyOptimal),
+                    pso::Descriptor::Sampler(&*sampler),
+                ]
+                .into_iter(),
+            });
         }
 
         // copy buffer to texture
@@ -528,13 +584,16 @@ where
                     ..(i::Access::TRANSFER_WRITE, i::Layout::TransferDstOptimal),
                 target: &*map_image,
                 families: None,
-                range: COLOR_RANGE.clone(),
+                range: i::SubresourceRange {
+                    aspects: f::Aspects::COLOR,
+                    ..Default::default()
+                },
             };
 
             cmd_buffer.pipeline_barrier(
                 PipelineStage::TOP_OF_PIPE..PipelineStage::TRANSFER,
                 m::Dependencies::empty(),
-                &[image_barrier],
+                iter::once(image_barrier),
             );
 
             info!("Image Extent: ({},{})", width, height);
@@ -543,7 +602,7 @@ where
                 &image_upload_buffer,
                 &map_image,
                 i::Layout::TransferDstOptimal,
-                &[command::BufferImageCopy {
+                iter::once(command::BufferImageCopy {
                     buffer_offset: 0,
                     buffer_width: row_pitch / (image_stride as u32),
                     buffer_height: height as u32,
@@ -558,7 +617,7 @@ where
                         height,
                         depth: 1,
                     },
-                }],
+                }),
             );
 
             let image_barrier = m::Barrier::Image {
@@ -566,18 +625,25 @@ where
                     ..(i::Access::SHADER_READ, i::Layout::ShaderReadOnlyOptimal),
                 target: &*map_image,
                 families: None,
-                range: COLOR_RANGE.clone(),
+                range: i::SubresourceRange {
+                    aspects: f::Aspects::COLOR,
+                    ..Default::default()
+                },
             };
             cmd_buffer.pipeline_barrier(
                 PipelineStage::TRANSFER..PipelineStage::FRAGMENT_SHADER,
                 m::Dependencies::empty(),
-                &[image_barrier],
+                iter::once(image_barrier),
             );
 
             cmd_buffer.finish();
 
-            queue_group.queues[0]
-                .submit_without_semaphores(Some(&cmd_buffer), Some(&mut image_copy_fence));
+            queue_group.queues[0].submit(
+                iter::once(&cmd_buffer),
+                iter::empty(),
+                iter::empty(),
+                Some(&mut image_copy_fence),
+            );
 
             device
                 .wait_for_fence(&image_copy_fence, !0)
@@ -609,31 +675,10 @@ where
                 .expect("Can't configure swapchain");
         };
 
-        let render_pass = {
-            let color_attachment = pass::Attachment {
-                format: Some(format),
-                samples: 1,
-                ops: pass::AttachmentOps::new(
-                    pass::AttachmentLoadOp::Clear,
-                    pass::AttachmentStoreOp::Store,
-                ),
-                stencil_ops: pass::AttachmentOps::DONT_CARE,
-                layouts: i::Layout::Undefined..i::Layout::Present,
-            };
+        // Depth Buffer
+        let depth_image = DepthImage::new(&adapter, &device, extent).unwrap();
 
-            let subpass = pass::SubpassDesc {
-                colors: &[(0, i::Layout::ColorAttachmentOptimal)],
-                depth_stencil: None,
-                inputs: &[],
-                resolves: &[],
-                preserves: &[],
-            };
-
-            ManuallyDrop::new(
-                unsafe { device.create_render_pass(&[color_attachment], &[subpass], &[]) }
-                    .expect("Can't create render pass"),
-            )
-        };
+        let render_pass = create_render_pass::<B>(&device, format);
 
         // Define maximum number of frames we want to be able to be "in flight" (being computed
         // simultaneously) at once
@@ -681,121 +726,53 @@ where
 
         let push_constants = vec![(ShaderStageFlags::VERTEX, 0..64)];
         let pipeline_layout = ManuallyDrop::new(
-            unsafe { device.create_pipeline_layout(iter::once(&*set_layout), push_constants) }
-                .expect("Can't create pipeline layout"),
+            unsafe {
+                device.create_pipeline_layout(iter::once(&*set_layout), push_constants.into_iter())
+            }
+            .expect("Can't create pipeline layout"),
         );
-        let pipeline = {
-            let mut shader_compiler = shaderc::Compiler::new().unwrap();
-            let shader_compiler_options = shaderc::CompileOptions::new().unwrap();
-            let vs_module = {
-                let spirv = shader_compiler
-                    .compile_into_spirv(
-                        &include_str!("../shaders/cube.vert"),
-                        shaderc::ShaderKind::Vertex,
-                        "cube.vert",
-                        "main",
-                        Some(&shader_compiler_options),
-                    )
-                    .unwrap();
-                unsafe { device.create_shader_module(&spirv.as_binary()) }.unwrap()
-            };
-            let fs_module = {
-                let spirv = shader_compiler
-                    .compile_into_spirv(
-                        &include_str!("../shaders/cube.frag"),
-                        shaderc::ShaderKind::Fragment,
-                        "cube.frag",
-                        "main",
-                        Some(&shader_compiler_options),
-                    )
-                    .unwrap();
-                unsafe { device.create_shader_module(&spirv.as_binary()) }.unwrap()
-            };
 
-            let pipeline = {
-                let (vs_entry, fs_entry) = (
-                    pso::EntryPoint {
-                        entry: ENTRY_NAME,
-                        module: &vs_module,
-                        specialization: pso::Specialization::default(),
-                    },
-                    pso::EntryPoint {
-                        entry: ENTRY_NAME,
-                        module: &fs_module,
-                        specialization: pso::Specialization::default(),
-                    },
-                );
-
-                let shader_entries = pso::GraphicsShaderSet {
-                    vertex: vs_entry,
-                    hull: None,
-                    domain: None,
-                    geometry: None,
-                    fragment: Some(fs_entry),
-                };
-
-                let subpass = Subpass {
-                    index: 0,
-                    main_pass: &*render_pass,
-                };
-
-                let rasterizer = Rasterizer {
-                    depth_clamping: false,
-                    polygon_mode: PolygonMode::Fill,
-                    cull_face: Face::BACK,
-                    front_face: FrontFace::Clockwise,
-                    depth_bias: None,
-                    conservative: false,
-                    line_width: pso::State::Dynamic,
-                };
-
-                let mut pipeline_desc = pso::GraphicsPipelineDesc::new(
-                    shader_entries,
-                    pso::Primitive::TriangleList,
-                    rasterizer,
-                    &*pipeline_layout,
-                    subpass,
-                );
-                pipeline_desc.blender.targets.push(pso::ColorBlendDesc {
-                    mask: pso::ColorMask::ALL,
-                    blend: Some(pso::BlendState::ALPHA),
-                });
-                pipeline_desc.vertex_buffers.push(pso::VertexBufferDesc {
-                    binding: 0,
-                    stride: mem::size_of::<Vertex>() as u32,
-                    rate: VertexInputRate::Vertex,
-                });
-
-                pipeline_desc.attributes.push(pso::AttributeDesc {
-                    location: 0,
-                    binding: 0,
-                    element: pso::Element {
-                        format: f::Format::Rgb32Sfloat,
-                        offset: 0,
-                    },
-                });
-                pipeline_desc.attributes.push(pso::AttributeDesc {
-                    location: 1,
-                    binding: 0,
-                    element: pso::Element {
-                        format: f::Format::Rg32Sfloat,
-                        offset: size_of::<[f32; 3]>() as ElemOffset,
-                    },
-                });
-
-                unsafe { device.create_graphics_pipeline(&pipeline_desc, None) }
-            };
-
-            unsafe {
-                device.destroy_shader_module(vs_module);
-            }
-            unsafe {
-                device.destroy_shader_module(fs_module);
-            }
-
-            ManuallyDrop::new(pipeline.unwrap())
+        let mut shader_compiler = shaderc::Compiler::new().unwrap();
+        let shader_compiler_options = shaderc::CompileOptions::new().unwrap();
+        let vs_module = {
+            let spirv = shader_compiler
+                .compile_into_spirv(
+                    &include_str!("../../../shaders/cube.vert"),
+                    shaderc::ShaderKind::Vertex,
+                    "cube.vert",
+                    "main",
+                    Some(&shader_compiler_options),
+                )
+                .unwrap();
+            unsafe { device.create_shader_module(&spirv.as_binary()) }.unwrap()
+        };
+        let fs_module = {
+            let spirv = shader_compiler
+                .compile_into_spirv(
+                    &include_str!("../../../shaders/cube.frag"),
+                    shaderc::ShaderKind::Fragment,
+                    "cube.frag",
+                    "main",
+                    Some(&shader_compiler_options),
+                )
+                .unwrap();
+            unsafe { device.create_shader_module(&spirv.as_binary()) }.unwrap()
         };
 
+        let pipeline = create_create_graphics_pipeline::<B>(
+            &device,
+            &render_pass,
+            &pipeline_layout,
+            &vs_module,
+            &fs_module,
+        );
+
+        unsafe {
+            device.destroy_shader_module(vs_module);
+        }
+        unsafe {
+            device.destroy_shader_module(fs_module);
+        }
         // Rendering setup
         let viewport = pso::Viewport {
             rect: pso::Rect {
@@ -829,6 +806,7 @@ where
             vertex_buffer_bundle,
             index_buffer_bundle,
             image_upload_buffer,
+            depth_image,
             map_image,
             image_srv,
             image_memory,
@@ -870,11 +848,16 @@ where
             }
         };
 
+        let caps = self.surface.capabilities(&self.adapter.physical_device);
+        let swap_config = window::SwapchainConfig::from_caps(&caps, self.format, self.dimensions);
+        let fat = swap_config.framebuffer_attachment();
+        debug!("Attachments: {:?}", fat);
+
         let framebuffer = unsafe {
             self.device
                 .create_framebuffer(
                     &self.render_pass,
-                    iter::once(surface_image.borrow()),
+                    iter::once(fat),
                     i::Extent {
                         width: self.dimensions.width,
                         height: self.dimensions.height,
@@ -895,7 +878,7 @@ where
         // updated with a CPU->GPU data copy are not in use by the GPU, so we can perform those updates.
         // In this case there are none to be done, however.
         unsafe {
-            let fence = &self.submission_complete_fences[frame_idx];
+            let fence = &mut self.submission_complete_fences[frame_idx];
             self.device
                 .wait_for_fence(fence, !0)
                 .expect("Failed to wait for fence");
@@ -910,34 +893,37 @@ where
         unsafe {
             cmd_buffer.begin_primary(command::CommandBufferFlags::ONE_TIME_SUBMIT);
 
-            cmd_buffer.set_viewports(0, &[self.viewport.clone()]);
-            cmd_buffer.set_scissors(0, &[self.viewport.rect]);
+            cmd_buffer.set_viewports(0, iter::once(self.viewport.clone()));
+            cmd_buffer.set_scissors(0, iter::once(self.viewport.rect));
             cmd_buffer.bind_graphics_pipeline(&self.pipeline);
             cmd_buffer.bind_vertex_buffers(
                 0,
                 iter::once((&*self.vertex_buffer_bundle.buffer, buffer::SubRange::WHOLE)),
             );
-            cmd_buffer.bind_index_buffer(IndexBufferView {
-                buffer: &self.index_buffer_bundle.buffer,
-                range: SubRange::WHOLE,
-                index_type: IndexType::U16,
-            });
+            cmd_buffer.bind_index_buffer(
+                &self.index_buffer_bundle.buffer,
+                SubRange::WHOLE,
+                IndexType::U16,
+            );
             cmd_buffer.bind_graphics_descriptor_sets(
                 &self.pipeline_layout,
                 0,
                 iter::once(&self.desc_set),
-                &[],
+                iter::empty(),
             );
 
             cmd_buffer.begin_render_pass(
                 &self.render_pass,
                 &framebuffer,
                 self.viewport.rect,
-                &[command::ClearValue {
-                    color: command::ClearColor {
-                        float32: [0.8, 0.8, 0.8, 1.0],
+                iter::once(command::RenderAttachmentInfo {
+                    image_view: surface_image.borrow(),
+                    clear_value: command::ClearValue {
+                        color: command::ClearColor {
+                            float32: [0.8, 0.8, 0.8, 1.0],
+                        },
                     },
-                }],
+                }),
                 command::SubpassContents::Inline,
             );
             for model in models.iter() {
@@ -952,22 +938,18 @@ where
             }
             cmd_buffer.end_render_pass();
             cmd_buffer.finish();
-
-            let submission = Submission {
-                command_buffers: iter::once(&*cmd_buffer),
-                wait_semaphores: None,
-                signal_semaphores: iter::once(&self.submission_complete_semaphores[frame_idx]),
-            };
             self.queue_group.queues[0].submit(
-                submission,
-                Some(&self.submission_complete_fences[frame_idx]),
+                iter::once(&*cmd_buffer),
+                iter::empty(),
+                iter::once(&self.submission_complete_semaphores[frame_idx]),
+                Some(&mut self.submission_complete_fences[frame_idx]),
             );
 
             // present frame
-            let result = self.queue_group.queues[0].present_surface(
+            let result = self.queue_group.queues[0].present(
                 &mut self.surface,
                 surface_image,
-                Some(&self.submission_complete_semaphores[frame_idx]),
+                Some(&mut self.submission_complete_semaphores[frame_idx]),
             );
 
             self.device.destroy_framebuffer(framebuffer);
@@ -986,7 +968,7 @@ where
 
 impl<B> Drop for Renderer<B>
 where
-    B: hal::Backend,
+    B: gfx_hal::Backend,
 {
     fn drop(&mut self) {
         self.device.wait_idle().unwrap();
@@ -1001,6 +983,8 @@ where
 
             self.vertex_buffer_bundle.manually_drop(&self.device);
             self.index_buffer_bundle.manually_drop(&self.device);
+
+            self.depth_image.manually_drop(&self.device);
 
             self.device
                 .destroy_buffer(ManuallyDrop::into_inner(ptr::read(
@@ -1044,89 +1028,6 @@ where
     }
 }
 
-pub struct BufferBundle<B: hal::Backend, D: hal::device::Device<B>> {
-    pub buffer: ManuallyDrop<B::Buffer>,
-    pub requirements: m::Requirements,
-    pub memory_type_id: hal::MemoryTypeId,
-    pub memory: ManuallyDrop<B::Memory>,
-    pub phantom: PhantomData<D>,
-}
-
-impl<B: hal::Backend, D: hal::device::Device<B>> BufferBundle<B, D> {
-    pub fn new(
-        device: &D,
-        size: u64,
-        usage: buffer::Usage,
-        memory_types: &[hal::adapter::MemoryType],
-        memory_props: m::Properties,
-    ) -> Result<Self, &'static str> {
-        unsafe {
-            let mut buffer = device
-                .create_buffer(size, usage)
-                .map_err(|_| "Couldn't create a buffer!")?;
-            let requirements = device.get_buffer_requirements(&buffer);
-            let memory_type_id: hal::MemoryTypeId = memory_types
-                .iter()
-                .enumerate()
-                .position(|(id, mem_type)| {
-                    requirements.type_mask & (1 << id) != 0
-                        && mem_type.properties.contains(memory_props)
-                })
-                .unwrap()
-                .into();
-
-            let memory = device
-                .allocate_memory(memory_type_id, requirements.size)
-                .map_err(|_| "Couldn't allocate buffer memory!")?;
-            device
-                .bind_buffer_memory(&memory, 0, &mut buffer)
-                .map_err(|_| "Couldn't bind the buffer memory!")?;
-            Ok(Self {
-                buffer: ManuallyDrop::new(buffer),
-                requirements,
-                memory_type_id,
-                memory: ManuallyDrop::new(memory),
-                phantom: PhantomData,
-            })
-        }
-    }
-
-    pub unsafe fn manually_drop(&self, device: &D) {
-        use core::ptr::read;
-        device.destroy_buffer(ManuallyDrop::into_inner(read(&self.buffer)));
-        device.free_memory(ManuallyDrop::into_inner(read(&self.memory)));
-    }
-}
-
-fn copy_buffer<B: hal::Backend, D: hal::device::Device<B>>(
-    device: &B::Device,
-    queue_group: &mut QueueGroup<B>,
-    command_pool: &mut B::CommandPool,
-    src_buffer: &mut BufferBundle<B, D>,
-    dst_buffer: &mut BufferBundle<B, D>,
-    regions: &[command::BufferCopy],
-) {
-    let mut copy_fence = device.create_fence(false).expect("Could not create fence");
-    unsafe {
-        let mut cmd_buffer = command_pool.allocate_one(command::Level::Primary);
-        cmd_buffer.begin_primary(command::CommandBufferFlags::ONE_TIME_SUBMIT);
-
-        cmd_buffer.copy_buffer(&src_buffer.buffer, &dst_buffer.buffer, regions);
-
-        cmd_buffer.finish();
-
-        queue_group.queues[0].submit_without_semaphores(Some(&cmd_buffer), Some(&mut copy_fence));
-
-        device
-            .wait_for_fence(&copy_fence, !0)
-            .expect("Can't wait for fence");
-    }
-
-    unsafe {
-        device.destroy_fence(copy_fence);
-    }
-}
-
 pub fn view() -> TMat4<f32> {
     glm::look_at_lh(
         &glm::vec3(7.0f32, 3.0f32, -4.0f32),
@@ -1156,4 +1057,12 @@ pub fn get_buffer_lens<T>(buffer: &[T], non_coherent_alignment: u64) -> (u64, u6
     let padded_buffer_len = ((buffer_len + non_coherent_alignment - 1) / non_coherent_alignment)
         * non_coherent_alignment;
     (buffer_len, padded_buffer_len)
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn it_works() {
+        assert_eq!(1 + 1, 2);
+    }
 }

@@ -63,3 +63,11 @@ pub fn setup_logging(verbosity: u64) -> Result<(), fern::InitError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
+    }
+}

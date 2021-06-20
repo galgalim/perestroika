@@ -1,0 +1,10 @@
+[package]
+name = "yantra_log"
+version = "0.1.0"
+authors = ["Michael Carpenter <mcarpenter.dev@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+fern = { version = "0.6", features = ["colored"] }
+log = "0.4"

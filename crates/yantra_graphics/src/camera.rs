@@ -16,6 +16,7 @@ pub struct Camera {
     pitch_deg: f32,
     yaw_deg: f32,
 }
+
 impl Camera {
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
 

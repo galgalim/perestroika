@@ -1,40 +1,20 @@
-#[cfg(feature = "dx12")]
-extern crate gfx_backend_dx12 as back;
-#[cfg(feature = "metal")]
-extern crate gfx_backend_metal as back;
-#[cfg(not(any(feature = "dx12", feature = "metal")))]
-extern crate gfx_backend_vulkan as back;
-
-use hal::Instance;
 use image::RgbaImage;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace};
 use nalgebra_glm as glm;
 use std::collections::HashSet;
-use std::io::{stdin, Cursor, Read, Write};
-use std::thread;
 use std::time::Instant;
 use winit::event::{
     DeviceEvent, ElementState, Event, KeyboardInput, MouseButton, VirtualKeyCode, WindowEvent,
 };
 use winit::event_loop::ControlFlow;
+use yantra::{TileType, World};
+use yantra_log::setup_logging;
+use yantra_tokamak::Tokamak;
 
-pub use logging::setup_logging;
-
-pub mod audio_render;
-pub mod camera;
-pub mod experimental;
-pub mod game;
-pub mod logging;
-pub mod ui;
-pub mod video_render;
-
-use camera::Camera;
-pub use game::{TileType, World};
-use video_render::view_projection;
-
-pub fn run_perestroika() {
-    std::env::set_var("RUST_BACKTRACE", "1");
-    //let audio_thread = std::thread::spawn(|| audio_render::run_audio_system());
+fn main() {
+    setup_logging(1).expect("failed to initialize logging.");
+    info!("Starting Yantra...");
+    std::env::set_var("RUST_BACKTRACE", "full");
 
     let event_loop = winit::event_loop::EventLoop::new();
 
@@ -45,67 +25,12 @@ pub fn run_perestroika() {
         .with_inner_size(winit::dpi::Size::Physical(winit::dpi::PhysicalSize::new(
             1920, 1080,
         )))
-        .with_title("perestroika".to_string());
+        .with_title("Yantra".to_string());
 
-    // instantiate backend
-    let (window, instance, mut adapters, surface) = {
-        let window = wb.build(&event_loop).unwrap();
-        let instance =
-            back::Instance::create("perestroika", 1).expect("Failed to create an instance!");
-        let adapters = instance.enumerate_adapters();
-        let surface = unsafe {
-            instance
-                .create_surface(&window)
-                .expect("Failed to create a surface!")
-        };
-        // Return `window` so it is not dropped: dropping it invalidates `surface`.
-        (window, Some(instance), adapters, surface)
-    };
+    let window = wb.build(&event_loop).unwrap();
 
-    for adapter in &adapters {
-        debug!("{:?}", adapter.info);
-    }
+    let mut tokamak = Tokamak::init(&window);
 
-    let adapter = adapters.remove(0);
-
-    info!("Generating World...");
-    let mut world = World::new(32);
-    world.map[0] = TileType::Dirt;
-    let (world_width, world_length) = world.dimensions();
-
-    let mut map_img = RgbaImage::new(world_width, world_length);
-    for (x, y, pixel) in map_img.enumerate_pixels_mut() {
-        let tile = &world.map[((y * world_width) + x) as usize];
-        match tile {
-            TileType::Grass => {
-                *pixel = image::Rgba([0, 125, 0, 255]);
-            }
-            TileType::Dirt => {
-                *pixel = image::Rgba([139, 69, 19, 255]);
-            }
-            TileType::Desert => {
-                *pixel = image::Rgba([255, 222, 173, 255]);
-            }
-            TileType::Water => {
-                *pixel = image::Rgba([0, 0, 255, 255]);
-            }
-        }
-    }
-
-    let mut renderer = video_render::Renderer::new(instance, surface, adapter, map_img)
-        .expect("Failed to create Renderer!");
-
-    let view_projection = view_projection();
-    let models = vec![
-        glm::identity(),
-        glm::translate(&glm::identity(), &glm::make_vec3(&[1.5, 0.1, 0.0])),
-        glm::translate(&glm::identity(), &glm::make_vec3(&[-3.0, 2.0, 3.0])),
-        glm::translate(&glm::identity(), &glm::make_vec3(&[0.5, -4.0, 4.0])),
-        glm::translate(&glm::identity(), &glm::make_vec3(&[-3.4, -2.3, 1.0])),
-        glm::translate(&glm::identity(), &glm::make_vec3(&[-2.8, -0.7, 5.0])),
-    ];
-    let (mut frame_width, mut frame_height): (f32, f32) = window.inner_size().into();
-    let camera = Camera::at_position(glm::make_vec3(&[0.0, 0.0, -5.0]));
     let mut keys_held: HashSet<VirtualKeyCode> = HashSet::new();
     let mut grabbed = false;
     let mut orientation_change: (f32, f32) = (0.0, 0.0);
@@ -129,12 +54,7 @@ pub fn run_perestroika() {
                 } => *control_flow = winit::event_loop::ControlFlow::Exit,
                 WindowEvent::Resized(dims) => {
                     debug!("resized to {:?}", dims);
-                    renderer.dimensions = hal::window::Extent2D {
-                        width: dims.width,
-                        height: dims.height,
-                    };
-                    new_frame_size = Some((dims.width as f64, dims.height as f64));
-                    renderer.recreate_swapchain();
+                    tokamak.recreate_swapchain(Some(dims));
                 }
                 WindowEvent::KeyboardInput {
                     input:
@@ -145,13 +65,6 @@ pub fn run_perestroika() {
                         },
                     ..
                 } => {
-                    #[cfg(feature = "metal")]
-                    {
-                        match state {
-                            ElementState::Pressed => keys_held.insert(code),
-                            ElementState::Released => keys_held.remove(&code),
-                        }
-                    };
                     if state == ElementState::Pressed {
                         match code {
                             VirtualKeyCode::Escape => {
@@ -208,7 +121,7 @@ pub fn run_perestroika() {
                 }
             }
             Event::RedrawEventsCleared => {
-                renderer.render(&view_projection, &models).unwrap();
+                tokamak.draw_frame();
             }
             _ => {}
         }
@@ -224,12 +137,4 @@ pub fn run_perestroika() {
             HashSet::new()
         }
     });
-}
-
-#[cfg(test)]
-mod test {
-    #[test]
-    fn it_works() {
-        assert_eq!(1 + 1, 2);
-    }
 }

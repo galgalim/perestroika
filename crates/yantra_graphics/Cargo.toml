@@ -1,0 +1,21 @@
+[package]
+name = "yantra_graphics"
+version = "0.1.0"
+authors = ["Michael Carpenter <mcarpenter.dev@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+cpal = "0.13"
+fern = { version = "0.6", features = ["colored"] }
+gfx-hal = "0.8"
+gfx-backend-vulkan = "0.8"
+image = "0.23"
+log = "0.4"
+mint = "0.5" 
+nalgebra-glm = "0.3"
+rand = "0.8"
+shaderc = "0.7"
+toml = "0.5"
+winit = "0.25"
+yantra_log = { path = "../yantra_log" }
